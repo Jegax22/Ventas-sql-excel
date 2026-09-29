@@ -1,24 +1,21 @@
 """
-generar_datos.py  |  Proyecto 1 - Análisis de ventas y rentabilidad de una tienda en línea
+generar_datos.py | Generador de dataset sintético para pruebas de ETL
 =====================================================================================
-Genera un dataset SINTÉTICO de comercio electrónico con la misma estructura que
-usarías con un dataset público real (5 tablas relacionadas):
+Genera 5 entidades (clientes, productos, pedidos, pagos, devoluciones) simulando un 
+entorno transaccional e-commerce (~100k registros).
 
-    clientes, productos, pedidos, pagos, devoluciones   (~100.000 registros en total)
-
-¿Por qué sintético?  Para que el proyecto sea 100 % reproducible sin descargar nada.
-El generador incluye "suciedad" a propósito (duplicados, nulos, texto inconsistente)
-para que la fase de limpieza tenga sentido.
-
-Uso:
-    python generar_datos.py            # escribe los CSV en ../data/
-
-La semilla (SEED) es fija: cualquiera que lo ejecute obtiene exactamente los mismos datos.
+Decisiones de diseño:
+  - Reproducibilidad: Uso de SEED fija.
+  - Distribución realista: Implementa distribuciones log-normales para simular concentración
+    de ventas (Pareto) en pocos productos/clientes y estacionalidad de negocio.
+  - Inyección de anomalías: Introduce nulos, duplicados y strings malformados intencionalmente 
+    para forzar el diseño de reglas de limpieza en la fase de Staging.
 """
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Fijar semilla para asegurar reproducibilidad del dataset en cada ejecución
 SEED = 42
 rng = np.random.default_rng(SEED)
 OUT = Path(__file__).resolve().parent.parent / "data"
@@ -27,8 +24,8 @@ OUT.mkdir(exist_ok=True)
 N_CLIENTES, N_PRODUCTOS, N_PEDIDOS = 8000, 500, 45000
 FECHA_INI, FECHA_FIN = pd.Timestamp("2024-07-01"), pd.Timestamp("2025-12-31")
 
-# ------------------------------------------------------------------ PRODUCTOS
-# categoria: (nº de productos, precio mínimo, precio máximo en COP, prob. devolución)
+# --- 1. PRODUCTOS ---
+# cat: (n_productos, p_min, p_max, prob_devolucion)
 CATEGORIAS = {
     "Electrónica": (80, 150_000, 2_500_000, 0.140),
     "Ropa":        (100, 40_000,    300_000, 0.160),
@@ -43,12 +40,13 @@ pid = 1
 for cat, (n, pmin, pmax, _) in CATEGORIAS.items():
     for _ in range(n):
         precio = int(round(rng.uniform(pmin, pmax), -2))
-        costo = int(round(precio * rng.uniform(0.55, 0.80), -2))
+        costo = int(round(precio * rng.uniform(0.55, 0.80), -2)) # Margen entre 20% y 45%
         filas.append((pid, f"{cat[:3].upper()}-{pid:04d}", cat, precio, costo))
         pid += 1
 productos = pd.DataFrame(filas, columns=["producto_id", "nombre_producto", "categoria", "precio_lista", "costo_unitario"])
 
-# ------------------------------------------------------------------ CLIENTES
+# --- 2. CLIENTES ---
+# Asignación de pesos ponderados por ciudad basados en distribución demográfica aprox.
 CIUDADES = [("Bogotá", "Cundinamarca"), ("Medellín", "Antioquia"), ("Cali", "Valle del Cauca"),
             ("Barranquilla", "Atlántico"), ("Cartagena", "Bolívar"), ("Bucaramanga", "Santander"),
             ("Ibagué", "Tolima"), ("Pereira", "Risaralda"), ("Manizales", "Caldas"),
@@ -64,20 +62,20 @@ clientes = pd.DataFrame({
     "canal_adquisicion": rng.choice(["orgánico", "redes_sociales", "publicidad_pago", "referido"], N_CLIENTES, p=[.35, .30, .25, .10]),
 })
 
-# ------------------------------------------------------------------ PEDIDOS
-# Popularidad de productos y de clientes: log-normal (pocos muy populares, muchos poco populares)
-w_prod = rng.lognormal(0, 1.2, N_PRODUCTOS)   # sigma=1.2 -> concentración tipo Pareto
+# --- 3. PEDIDOS ---
+# Aplicar distribución log-normal para simular concentración de ventas (Principio de Pareto)
+w_prod = rng.lognormal(0, 1.2, N_PRODUCTOS)   
 w_prod /= w_prod.sum()
 w_cli = rng.lognormal(0, 1.0, N_CLIENTES)
 w_cli /= w_cli.sum()
 
 dias = (FECHA_FIN - FECHA_INI).days + 1
 fechas_base = pd.date_range(FECHA_INI, FECHA_FIN)
-# Estacionalidad: más ventas en nov-dic y un leve crecimiento en el tiempo
+# Inyección de estacionalidad (picos en H2 y nov/dic)
 peso_dia = np.array([1.0 + 0.5 * (d.month in (11, 12)) + 0.25 * (d.month == 6) + 0.0008 * i
                      for i, d in enumerate(fechas_base)])
 peso_dia /= peso_dia.sum()
-fecha_pedido = np.sort(fechas_base[rng.choice(dias, N_PEDIDOS, p=peso_dia)])  # ids crecientes en el tiempo
+fecha_pedido = np.sort(fechas_base[rng.choice(dias, N_PEDIDOS, p=peso_dia)])  
 
 prod_ids = rng.choice(productos["producto_id"].to_numpy(), N_PEDIDOS, p=w_prod)
 precio_lista = productos.set_index("producto_id").loc[prod_ids, "precio_lista"].to_numpy()
@@ -92,7 +90,7 @@ pedidos = pd.DataFrame({
     "estado": rng.choice(["entregado", "cancelado", "en_proceso"], N_PEDIDOS, p=[.92, .06, .02]),
 })
 
-# ------------------------------------------------------------------ PAGOS
+# --- 4. PAGOS ---
 metodo = rng.choice(["tarjeta_credito", "pse", "contraentrega", "transferencia", "billetera_digital"],
                     N_PEDIDOS, p=[.45, .25, .18, .07, .05])
 valor_neto = (pedidos["cantidad"] * pedidos["precio_unitario"] * (1 - pedidos["descuento_pct"] / 100)).round(0)
@@ -104,15 +102,18 @@ pagos = pd.DataFrame({
     "fecha_pago": pedidos["fecha_pedido"],
 })
 
-# ------------------------------------------------------------------ DEVOLUCIONES
+# --- 5. DEVOLUCIONES ---
+# Probabilidad de devolución sujeta a la categoría del producto (ver dict CATEGORIAS)
 cat_por_pedido = productos.set_index("producto_id").loc[pedidos["producto_id"], "categoria"].to_numpy()
 p_dev = np.array([CATEGORIAS[c][3] for c in cat_por_pedido])
 hay_dev = (rng.random(N_PEDIDOS) < p_dev) & (pedidos["estado"].to_numpy() == "entregado")
+
 MOTIVOS = {
     "Electrónica": (["producto_defectuoso", "no_cumple_expectativas", "llegó_dañado", "otro"], [.50, .20, .20, .10]),
     "Ropa":        (["talla_incorrecta", "no_cumple_expectativas", "llegó_dañado", "otro"], [.55, .25, .10, .10]),
 }
 MOT_DEFAULT = (["no_cumple_expectativas", "llegó_dañado", "producto_defectuoso", "otro"], [.40, .25, .20, .15])
+
 dev_rows = []
 for i in np.where(hay_dev)[0]:
     lst, pr = MOTIVOS.get(cat_por_pedido[i], MOT_DEFAULT)
@@ -124,21 +125,23 @@ for i in np.where(hay_dev)[0]:
 devoluciones = pd.DataFrame(dev_rows, columns=["pedido_id", "fecha_devolucion", "motivo", "valor_reembolsado"])
 devoluciones.insert(0, "devolucion_id", np.arange(1, len(devoluciones) + 1))
 
-# ------------------------------------------------------------------ "SUCIEDAD" A PROPÓSITO
-# (1) nulos
+# --- 6. INYECCIÓN DE ANOMALÍAS (Ruido) ---
+# Nulos aleatorios
 clientes.loc[rng.choice(N_CLIENTES, 160, replace=False), "ciudad"] = None
 pedidos.loc[rng.choice(N_PEDIDOS, 700, replace=False), "descuento_pct"] = np.nan
 pagos.loc[rng.choice(N_PEDIDOS, 450, replace=False), "metodo_pago"] = None
-# (2) texto inconsistente (mayúsculas / espacios)
+
+# Strings malformados (Upper/lower inconsistente y whitespaces)
 for i in rng.choice(N_CLIENTES, 400, replace=False):
     if clientes.loc[i, "ciudad"] is not None:
         c = str(clientes.loc[i, "ciudad"])
         clientes.loc[i, "ciudad"] = c.upper() if rng.random() < 0.5 else " " + c + " "
-# (3) filas duplicadas exactas
+
+# Duplicados exactos para testear constraints y deduplicación
 clientes = pd.concat([clientes, clientes.sample(90, random_state=1)], ignore_index=True)
 pedidos = pd.concat([pedidos, pedidos.sample(230, random_state=2)], ignore_index=True)
 
-# ------------------------------------------------------------------ GUARDAR
+# --- 7. EXPORTACIÓN ---
 total = 0
 for nombre, df in [("clientes", clientes), ("productos", productos), ("pedidos", pedidos),
                    ("pagos", pagos), ("devoluciones", devoluciones)]:

@@ -1,21 +1,18 @@
 -- =====================================================================
--- 01_schema.sql | Proyecto 1: Análisis de ventas y rentabilidad
--- Motor: MySQL 8.0+   (necesario para CTE y funciones de ventana)
--- Qué hace: crea la base de datos, las tablas de STAGING y las tablas FINALES.
---
--- Diseño en dos capas (práctica profesional):
---   stg_*  -> "staging": copia fiel del CSV, todo como texto y SIN restricciones.
---             Así la carga nunca falla por datos sucios.
---   final  -> tablas tipadas, con llaves primarias/foráneas. Se llenan en
---             03_limpieza.sql, después de limpiar.
+-- 01_schema.sql | DDL y Arquitectura de Datos
+-- Implementa patrón "Staging-to-Final" para tolerancia a fallos en la ingesta.
+-- Motor target: MySQL 8.0+ (Soporte Window Functions).
 -- =====================================================================
 
 DROP DATABASE IF EXISTS tienda_online;
 CREATE DATABASE tienda_online CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE tienda_online;
 
+
 -- ---------------------------------------------------------------------
--- 1) STAGING (todo VARCHAR, sin PK/FK)
+-- 1. STAGING LAYER
+-- Tipado débil (VARCHAR universal) sin constraints para garantizar ingesta 
+-- de archivos raw sin fallos de validación.
 -- ---------------------------------------------------------------------
 CREATE TABLE stg_clientes (
     cliente_id        VARCHAR(20),
@@ -61,8 +58,9 @@ CREATE TABLE stg_devoluciones (
 );
 
 -- ---------------------------------------------------------------------
--- 2) TABLAS FINALES (tipadas y con integridad referencial)
---    Orden de creación: primero las tablas "padre", luego las "hijas".
+-- 2. FINAL/CORE LAYER
+-- Tipado fuerte con integridad referencial (PKs/FKs).
+-- Orden de DDL estricto: Dimensiones (Padres) primero, Hechos (Hijas) después.
 -- ---------------------------------------------------------------------
 CREATE TABLE clientes (
     cliente_id        INT          NOT NULL,
@@ -74,23 +72,23 @@ CREATE TABLE clientes (
 );
 
 CREATE TABLE productos (
-    producto_id     INT           NOT NULL,
-    nombre_producto VARCHAR(80)   NOT NULL,
-    categoria       VARCHAR(40)   NOT NULL,
-    precio_lista    INT           NOT NULL,
-    costo_unitario  INT           NOT NULL,
+    producto_id     INT          NOT NULL,
+    nombre_producto VARCHAR(80)  NOT NULL,
+    categoria       VARCHAR(40)  NOT NULL,
+    precio_lista    INT          NOT NULL,
+    costo_unitario  INT          NOT NULL,
     PRIMARY KEY (producto_id)
 );
 
 CREATE TABLE pedidos (
-    pedido_id       INT           NOT NULL,
-    cliente_id      INT           NOT NULL,
-    producto_id     INT           NOT NULL,
-    fecha_pedido    DATE          NOT NULL,
-    cantidad        INT           NOT NULL,
-    precio_unitario INT           NOT NULL,
-    descuento_pct   DECIMAL(5,2)  NOT NULL DEFAULT 0,
-    estado          VARCHAR(20)   NOT NULL,
+    pedido_id       INT          NOT NULL,
+    cliente_id      INT          NOT NULL,
+    producto_id     INT          NOT NULL,
+    fecha_pedido    DATE         NOT NULL,
+    cantidad        INT          NOT NULL,
+    precio_unitario INT          NOT NULL,
+    descuento_pct   DECIMAL(5,2) NOT NULL DEFAULT 0,
+    estado          VARCHAR(20)  NOT NULL,
     PRIMARY KEY (pedido_id),
     FOREIGN KEY (cliente_id)  REFERENCES clientes (cliente_id),
     FOREIGN KEY (producto_id) REFERENCES productos (producto_id)
@@ -117,7 +115,8 @@ CREATE TABLE devoluciones (
 );
 
 -- ---------------------------------------------------------------------
--- 3) ÍNDICES: aceleran los JOIN y filtros más usados en el análisis
+-- 3. INDEXING STRATEGY
+-- Índices no clusterizados orientados a optimizar FK lookups y segmentación temporal.
 -- ---------------------------------------------------------------------
 CREATE INDEX idx_pedidos_cliente  ON pedidos (cliente_id);
 CREATE INDEX idx_pedidos_producto ON pedidos (producto_id);

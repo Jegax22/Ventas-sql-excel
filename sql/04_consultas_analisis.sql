@@ -1,13 +1,13 @@
 -- =====================================================================
--- 04_consultas_analisis.sql | 15 consultas de análisis (MySQL 8.0+)
--- Requiere haber ejecutado 01, 02 y 03 (usa las vistas v_ventas y v_ingresos_producto).
--- Cada consulta indica: PREGUNTA de negocio, TÉCNICA SQL usada y QUÉ LEER en el resultado.
+-- 04_consultas_analisis.sql | Módulo de Analítica y Reporting
+-- Dependencias: stg -> core -> v_ventas / v_ingresos_producto.
+-- Motor target: MySQL 8.0+ (Soporte nativo para CTEs y Window Functions).
 -- =====================================================================
 USE tienda_online;
 
 -- ---------------------------------------------------------------------
--- Q01 | ¿Cuántos registros hay en cada tabla?     [UNION ALL]
--- Sanity check: siempre se empieza verificando que los datos cargaron completos.
+-- Q01 | Data Completeness / Sanity Check
+-- Validación de volumen de ingesta tras el pipeline ETL.
 -- ---------------------------------------------------------------------
 SELECT 'clientes' AS tabla, COUNT(*) AS filas FROM clientes
 UNION ALL SELECT 'productos',    COUNT(*) FROM productos
@@ -16,8 +16,8 @@ UNION ALL SELECT 'pagos',        COUNT(*) FROM pagos
 UNION ALL SELECT 'devoluciones', COUNT(*) FROM devoluciones;
 
 -- ---------------------------------------------------------------------
--- Q02 | KPIs generales del negocio     [agregaciones sobre la vista]
--- Lectura: ticket_promedio = ingreso medio por pedido; margen_pct = utilidad / ingreso neto.
+-- Q02 | Core Business KPIs
+-- Definición de negocio: Margen = Utilidad operativa / Ingreso Neto.
 -- ---------------------------------------------------------------------
 SELECT COUNT(*)                                        AS pedidos_entregados,
        ROUND(SUM(ingreso), 0)                          AS ingresos,
@@ -28,8 +28,8 @@ SELECT COUNT(*)                                        AS pedidos_entregados,
 FROM v_ventas;
 
 -- ---------------------------------------------------------------------
--- Q03 | Ingresos por mes y ventas ACUMULADAS     [CTE + SUM() OVER (ORDER BY ...)]
--- La CTE agrupa por mes; la función de ventana suma "hasta la fila actual".
+-- Q03 | Ingresos Mensuales y Curva Acumulada (YTD)
+-- Implementación: Frame dinámico UNBOUNDED PRECEDING para el rolling sum.
 -- ---------------------------------------------------------------------
 WITH mensual AS (
     SELECT DATE_FORMAT(fecha_pedido, '%Y-%m') AS mes,
@@ -45,8 +45,8 @@ FROM mensual
 ORDER BY mes;
 
 -- ---------------------------------------------------------------------
--- Q04 | Variación % de ingresos frente al mes anterior     [LAG]
--- LAG(x) trae el valor de la fila anterior. El primer mes no tiene anterior (NULL).
+-- Q04 | Crecimiento MoM (Month-over-Month)
+-- Implementación: Función LAG para aislar métricas de t-1.
 -- ---------------------------------------------------------------------
 WITH mensual AS (
     SELECT DATE_FORMAT(fecha_pedido, '%Y-%m') AS mes,
@@ -66,7 +66,7 @@ FROM con_anterior
 ORDER BY mes;
 
 -- ---------------------------------------------------------------------
--- Q05 | Top 10 productos por ingresos     [RANK() OVER + LIMIT]
+-- Q05 | Top 10 Productos por Gross Revenue
 -- ---------------------------------------------------------------------
 SELECT RANK() OVER (ORDER BY ingresos DESC) AS ranking,
        producto_id, nombre_producto, categoria,
@@ -77,9 +77,9 @@ ORDER BY ranking
 LIMIT 10;
 
 -- ---------------------------------------------------------------------
--- Q06 | Top 3 productos DENTRO de cada categoría     [RANK() OVER (PARTITION BY ...)]
--- PARTITION BY reinicia el ranking en cada categoría. Se filtra en una consulta externa
--- porque no se puede usar un alias de ventana en el WHERE del mismo SELECT.
+-- Q06 | Intra-category Top Performers (Top 3)
+-- Implementación: Window function particionada por categoría. Filtrado en 
+-- outer query (las funciones de ventana no son válidas en WHERE).
 -- ---------------------------------------------------------------------
 SELECT categoria, pos_en_categoria, nombre_producto, ROUND(ingresos, 0) AS ingresos
 FROM (
@@ -91,8 +91,8 @@ WHERE pos_en_categoria <= 3
 ORDER BY categoria, pos_en_categoria;
 
 -- ---------------------------------------------------------------------
--- Q07 | Ingresos, margen y participación por categoría     [GROUP BY + SUM() OVER ()]
--- SUM(SUM(x)) OVER () = total general, útil para calcular "% del total".
+-- Q07 | Revenue Share y Rentabilidad por Categoría
+-- Implementación: Over() vacío para referenciar el Grand Total dentro de la agrupación.
 -- ---------------------------------------------------------------------
 SELECT categoria,
        COUNT(*)                                            AS pedidos,
@@ -104,10 +104,9 @@ GROUP BY categoria
 ORDER BY ingresos DESC;
 
 -- ---------------------------------------------------------------------
--- Q08 | ANÁLISIS DE PARETO: ¿cuántos productos generan el 70 % de los ingresos?
---      [CTE + SUM() OVER (frame acumulado) + ROW_NUMBER + subconsultas escalares]
--- Se ordenan los productos de mayor a menor ingreso, se acumula el % y se busca
--- el primer producto donde el acumulado alcanza el 70 %.
+-- Q08 | Análisis de Pareto (Concentración de Ingresos)
+-- Validación matemática de la regla 80/20 adaptada al dataset. 
+-- Calcula el threshold dinámico de productos que componen el 70% del revenue.
 -- ---------------------------------------------------------------------
 WITH acum AS (
     SELECT producto_id, ingresos,
@@ -126,9 +125,8 @@ SELECT (SELECT COUNT(*) FROM productos)                                        A
              / (SELECT SUM(ingresos) FROM acum), 1)                            AS pct_ingresos_del_top20pct_productos;
 
 -- ---------------------------------------------------------------------
--- Q09 | Tasa de devoluciones por categoría     [GROUP BY + HAVING + agregación condicional]
--- devuelto es 0/1, así que SUM(devuelto) cuenta los pedidos devueltos.
--- HAVING filtra grupos (categorías con al menos 100 pedidos, para no sacar conclusiones con poca muestra).
+-- Q09 | Tasa de Devoluciones por Categoría
+-- Control de significancia estadística: Umbral mínimo de 100 pedidos.
 -- ---------------------------------------------------------------------
 SELECT categoria,
        COUNT(*)                                     AS pedidos_entregados,
@@ -141,7 +139,8 @@ HAVING COUNT(*) >= 100
 ORDER BY tasa_devolucion_pct DESC;
 
 -- ---------------------------------------------------------------------
--- Q10 | Motivo de devolución más frecuente por categoría     [CTE + ROW_NUMBER PARTITION]
+-- Q10 | Moda de Motivos de Devolución
+-- Retorna el top reason code por categoría de producto.
 -- ---------------------------------------------------------------------
 WITH motivos AS (
     SELECT pr.categoria, d.motivo, COUNT(*) AS n
@@ -162,7 +161,7 @@ WHERE pos = 1
 ORDER BY devoluciones DESC;
 
 -- ---------------------------------------------------------------------
--- Q11 | Top 10 clientes por gasto y su % del total     [GROUP BY + subconsulta escalar]
+-- Q11 | Top 10 Clientes por LTV (Customer Lifetime Value) histórico
 -- ---------------------------------------------------------------------
 SELECT cliente_id,
        COUNT(*)                                                    AS pedidos,
@@ -174,8 +173,7 @@ ORDER BY gasto_total DESC
 LIMIT 10;
 
 -- ---------------------------------------------------------------------
--- Q12 | Cuartiles de clientes según gasto: ¿qué % de ingresos aporta cada 25 %?     [NTILE]
--- NTILE(4) reparte los clientes en 4 grupos del mismo tamaño (1 = los que más gastan).
+-- Q12 | Segmentación RFM (Factor Monetario) por Cuartiles
 -- ---------------------------------------------------------------------
 WITH por_cliente AS (
     SELECT cliente_id, SUM(ingreso) AS gasto
@@ -195,7 +193,7 @@ GROUP BY cuartil
 ORDER BY cuartil;
 
 -- ---------------------------------------------------------------------
--- Q13 | Clientes de compra única vs. recurrentes     [CTE + CASE + agregación]
+-- Q13 | Cohort Segmentation: Retención (Repeat vs. Single Purchasers)
 -- ---------------------------------------------------------------------
 WITH por_cliente AS (
     SELECT cliente_id, COUNT(*) AS pedidos, SUM(ingreso) AS gasto
@@ -218,7 +216,7 @@ GROUP BY tipo_cliente
 ORDER BY tipo_cliente;
 
 -- ---------------------------------------------------------------------
--- Q14 | Ingresos y participación por método de pago     [GROUP BY + SUM(SUM()) OVER ()]
+-- Q14 | Share de Pasarelas / Métodos de Pago
 -- ---------------------------------------------------------------------
 SELECT metodo_pago,
        COUNT(*)                                                     AS pedidos,
@@ -229,8 +227,9 @@ GROUP BY metodo_pago
 ORDER BY ingresos DESC;
 
 -- ---------------------------------------------------------------------
--- Q15 | Productos que venden MÁS que el promedio de su propia categoría
---      [subconsulta CORRELACIONADA: se recalcula para cada fila de la consulta externa]
+-- Q15 | Outliers Positivos (Productos vs Baseline de su Categoría)
+-- Implementación: Correlated Subquery en el WHERE. Evaluado por fila contra
+-- el promedio dinámico del segmento.
 -- ---------------------------------------------------------------------
 SELECT pp.categoria,
        pp.nombre_producto,
