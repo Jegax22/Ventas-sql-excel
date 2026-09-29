@@ -1,0 +1,11 @@
+ranking,producto_id,nombre_producto,categoria,ingresos,unidades
+1,2,ELE-0002,Electrónica,1203164720.0,586
+2,54,ELE-0054,Electrónica,857577480.0,753
+3,11,ELE-0011,Electrónica,614060300.0,336
+4,307,DEP-0307,Deportes,541688375.0,978
+5,23,ELE-0023,Electrónica,487765945.0,244
+6,60,ELE-0060,Electrónica,455972880.0,411
+7,33,ELE-0033,Electrónica,361967565.0,233
+8,293,DEP-0293,Deportes,347736195.0,661
+9,16,ELE-0016,Electrónica,311536385.0,172
+10,49,ELE-0049,Electrónica,293205035.0,308
